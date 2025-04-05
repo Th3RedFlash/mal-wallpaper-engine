@@ -1,7 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import requests
-import xml.etree.ElementTree as ET
 from bs4 import BeautifulSoup
 
 app = FastAPI()
@@ -15,19 +14,14 @@ app.add_middleware(
 )
 
 @app.get("/wallpapers")
-def get_wallpapers(username: str, max_per_anime: int = 3):
-    mal_url = f"https://myanimelist.net/malappinfo.php?u={username}&type=anime"
-    response = requests.get(mal_url)
-    if response.status_code != 200:
-        return {"error": "Could not fetch MAL data"}
-
-    root = ET.fromstring(response.content)
-    completed = []
-
-    for anime in root.findall("anime"):
-        if anime.find("my_status").text == "Completed":
-            title = anime.find("series_title").text
-            completed.append(title)
+def get_wallpapers(max_per_anime: int = 3):
+    # Temporary fixed anime list for testing (bypassing MAL)
+    completed = [
+        "Attack on Titan",
+        "Naruto",
+        "Demon Slayer",
+        "Hunter x Hunter"
+    ]
 
     results = {}
     for title in completed:
