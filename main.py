@@ -1,7 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import requests
-import xml.etree.ElementTree as ET
 from bs4 import BeautifulSoup
 
 app = FastAPI()
@@ -24,21 +23,20 @@ def get_wallpapers(username: str, search: str = None, max_per_anime: int = 3):
         )
     }
 
-    mal_url = f"https://myanimelist.net/malappinfo.php?u={username}&type=anime"
+    mal_url = f"https://myanimelist.net/animelist/{username}?status=1"  # Completed anime
     response = requests.get(mal_url, headers=headers)
+
     if response.status_code != 200:
         return {"error": "Could not fetch MAL data"}
 
-    try:
-        root = ET.fromstring(response.content)
-    except ET.ParseError:
-        return {"error": "Failed to parse MAL XML"}
-
+    soup = BeautifulSoup(response.text, "html.parser")
     anime_titles = []
-    for anime in root.findall("anime"):
-        title = anime.find("series_title").text
-        status = anime.find("my_status").text
-        if status in ["1", "2", "6"]:  # Watching, Completed, Plan to Watch
+
+    # Find all anime titles listed on the page
+    for item in soup.select(".animelist .list-item"):
+        title_tag = item.select_one(".title > a")
+        if title_tag:
+            title = title_tag.get_text(strip=True)
             if not search or search.lower() in title.lower():
                 anime_titles.append(title)
 
@@ -55,8 +53,7 @@ def get_wallpapers(username: str, search: str = None, max_per_anime: int = 3):
             html = requests.get(wallhaven_url, headers=headers, timeout=10).text
             soup = BeautifulSoup(html, "html.parser")
             thumbs = soup.select("figure > a.preview")
-        except Exception as e:
-            print(f"Error loading {title}: {e}")
+        except:
             continue
 
         images = []
@@ -74,8 +71,7 @@ def get_wallpapers(username: str, search: str = None, max_per_anime: int = 3):
                         images.append(full_img_url)
                 if len(images) >= max_per_anime:
                     break
-            except Exception as e:
-                print(f"Error checking image: {e}")
+            except:
                 continue
 
         if images:
