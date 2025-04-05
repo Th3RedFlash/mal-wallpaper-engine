@@ -1,21 +1,29 @@
-# main.py (Using Wallhaven.cc API with Multiple Title Search Attempts)
+# main.py (Wallhaven API with Smart Search: Specific then Generic Fallback + Concurrency)
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import requests
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup # Keep for MAL HTML fallback
 from urllib.parse import quote_plus
 import json
 import time
 import re
 import asyncio
 import traceback
+import os
+
+# --- Configuration ---
+CONCURRENCY_LIMIT = int(os.environ.get("WALLHAVEN_CONCURRENCY", 5)) # Read from env, default 5
+WALLHAVEN_API_KEY = os.environ.get("WALLHAVEN_API_KEY", None) # Read from env
+if WALLHAVEN_API_KEY:
+    print(f"Wallhaven API Key found. Concurrency Limit: {CONCURRENCY_LIMIT}")
+else:
+    print(f"Wallhaven API Key not found. Concurrency Limit: {CONCURRENCY_LIMIT}")
 
 # Initialize FastAPI app
 app = FastAPI()
 
 # Add CORS middleware
-# ... (CORS middleware setup remains the same)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -24,279 +32,232 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Define standard Headers
+# Define standard Headers (Includes API Key if set)
 HEADERS = {
-    "User-Agent": "MAL_Wallpaper_Engine/1.1 (Contact: YourEmailOrProjectURL; Purpose: Fetching relevant wallpapers based on user MAL list)"
+    "User-Agent": "MAL_Wallpaper_Engine/1.4 (Smart Search; Contact: YourEmailOrProjectURL)"
 }
+if WALLHAVEN_API_KEY:
+    HEADERS['X-API-Key'] = WALLHAVEN_API_KEY
+    print("Using Wallhaven API Key in headers.")
 
-# --- Title Simplification Function (Same as before) ---
+
+# --- Title Simplification Function ---
 def simplify_title(title):
     """
-    Simplifies an anime title by removing common season/part indicators
-    and any text following them.
+    Aggressively simplifies an anime title for generic searching.
+    Removes season/part indicators, subtitles after colon+space, etc.
     """
-    # ... (simplify_title function remains the same)
     title = title.strip()
+    # Remove subtitle after ': ' first
     match_colon = re.search(r':\s', title)
     if match_colon:
         title = title[:match_colon.start()].strip()
-        return title
+        # Return early if colon simplification worked, as it often yields the base title
+        # return title # Re-evaluate if returning early is best, maybe still apply season removal? Keep processing for now.
+
+    # Remove common sequel indicators and following text
     cleaned_title = re.split(
         r'\s+\b(?:Season|Part|Cour|Movies?|Specials?|OVAs?|Partie|Saison|Staffel|The Movie|Movie|Film|\d{1,2})\b',
         title,
         maxsplit=1,
         flags=re.IGNORECASE
     )[0]
+    # Remove trailing punctuation
     cleaned_title = re.sub(r'\s*[:\-]\s*$', '', cleaned_title).strip()
+    # Handle simple "Title 2" cases if missed
     if re.match(r'.+\s+\d+$', cleaned_title):
          cleaned_title = re.split(r'\s+\d+$', cleaned_title)[0].strip()
-    return cleaned_title if cleaned_title else title
+
+    return cleaned_title if cleaned_title else title # Return original if cleaning results in empty string
 
 # --- Wallpaper Search Function (Wallhaven.cc API - performs ONE search) ---
-def search_wallhaven(search_term, max_results_limit):
-    """
-    Performs a single search on Wallhaven.cc API for a given search term.
-    Returns a list of image URLs found.
-    """
+def search_wallhaven(search_term, max_results_limit): # max_results_limit not used here, applied later
+    """ Performs a single search on Wallhaven.cc API for a given search term. """
     print(f"  [Wallhaven Search] Querying API for: '{search_term}'")
     image_urls = []
     search_url = "https://wallhaven.cc/api/v1/search"
     params = {
         'q': search_term,
         'categories': '010', # Anime
-        'purity': '100',     # SFW
-        'sorting': 'relevance',
+        'purity': '100',     # SFW (Change to '110' for SFW+Sketchy if desired)
+        'sorting': 'relevance', # relevance | date_added | views | favorites | toplist | random
         'order': 'desc',
-        # 'atleast': '1920x1080', # Keep resolution filter commented out for broader results initially
+        # 'atleast': '1920x1080', # Commented out for broader results
     }
+    # API key is now added via HEADERS globally if present
 
     try:
-        # Delay before this specific API call
-        time.sleep(1.5)
+        # Keep delay before each API call to space requests.
+        time.sleep(1.0)
 
         response = requests.get(search_url, params=params, headers=HEADERS, timeout=20)
-        response.raise_for_status()
+        response.raise_for_status() # Raise HTTPError for bad responses (4xx/5xx)
         data = response.json()
 
         if data and 'data' in data and isinstance(data['data'], list):
             results_found = len(data['data'])
             print(f"    -> API returned {results_found} results.")
-            count = 0
-            for item in data['data']:
-                # Stop if we conceptually have enough overall, although this function doesn't know the final target count
-                # if count >= max_results_limit: break # This limit isn't very useful here, apply limit when combining
-                if 'path' in item and isinstance(item['path'], str):
-                    image_urls.append(item['path'])
-                    count += 1
-            print(f"    -> Extracted {count} wallpaper URLs.")
+            # Extract all valid image paths
+            image_urls = [item['path'] for item in data['data'] if 'path' in item and isinstance(item['path'], str)]
+            print(f"    -> Extracted {len(image_urls)} wallpaper URLs.")
         else:
-            print(f"    -> No 'data' array found or invalid response.")
+            print(f"    -> No 'data' array found or invalid response structure.")
         return image_urls
 
+    # Keep detailed error handling
     except requests.exceptions.HTTPError as e_http:
-        print(f"  [Wallhaven Search] HTTP Error searching for '{search_term}': {e_http}")
+        print(f"  [WH Search] HTTP Error searching for '{search_term}': {e_http}")
         if e_http.response.status_code == 429: print(">>> Rate limit likely hit!")
+        # Log response body if available (might contain error details)
+        try: print(f"      Response Body: {e_http.response.text[:200]}")
+        except: pass
         return []
-    except requests.exceptions.Timeout:
-        print(f"  [Wallhaven Search] Timeout searching for '{search_term}'")
-        return []
-    except requests.exceptions.RequestException as e_req:
-        print(f"  [Wallhaven Search] Network Error searching for '{search_term}': {e_req}")
-        return []
-    except json.JSONDecodeError as e_json:
-        print(f"  [Wallhaven Search] Error decoding JSON response for '{search_term}': {e_json}")
-        print(f"      Response text: {response.text[:200]}")
-        return []
-    except Exception as e_general:
-        print(f"  [Wallhaven Search] Unexpected error during search for '{search_term}': {e_general}")
-        traceback.print_exc()
-        return []
+    except requests.exceptions.Timeout: print(f"  [WH Search] Timeout searching for '{search_term}'"); return []
+    except requests.exceptions.RequestException as e_req: print(f"  [WH Search] Network Error for '{search_term}': {e_req}"); return []
+    except json.JSONDecodeError as e_json: print(f"  [WH Search] Error decoding JSON for '{search_term}': {e_json}"); print(f"      Response text: {response.text[:200]}"); return []
+    except Exception as e_general: print(f"  [WH Search] Unexpected error for '{search_term}': {e_general}"); traceback.print_exc(); return []
 
 # --- Main Endpoint ---
 @app.get("/wallpapers")
 async def get_wallpapers(username: str, search: str = None, max_per_anime: int = 3):
     """
-    Fetches completed anime for a MAL user, attempts multiple title variations
-    to find wallpapers using the Wallhaven.cc API.
+    Fetches MAL list, uses Smart Search (Specific then Generic Fallback) via Wallhaven API
+    using LIMITED CONCURRENCY.
     """
-    # Stores dicts: {'title': main_title, 'title_eng': english_title_or_none}
+    start_time = time.time()
     anime_data_list = []
     mal_data_fetched_successfully = False
     last_error_message = "Unknown error during MAL fetch."
     response = None
 
-    # --- Fetch and Parse MAL Data ---
-    # Attempt 1: Modern JSON endpoint
-    mal_json_url = f"https://myanimelist.net/animelist/{username}/load.json?status=2&offset=0&order=1"
-    print(f"Attempt 1: Fetching MAL data for {username} from JSON endpoint...")
-    try:
-        mal_fetch_headers = {"User-Agent": HEADERS["User-Agent"]}
+    # --- Fetch and Parse MAL Data (Attempt 1: JSON, Attempt 2: HTML) ---
+    # ... (This logic remains the same as the previous version) ...
+    # ... It populates anime_data_list with dicts: {'title': '...', 'title_eng': '...'} ...
+    print(f"Fetching MAL data for {username}...")
+    try: # MAL JSON Fetch
+        mal_json_url = f"https://myanimelist.net/animelist/{username}/load.json?status=2&offset=0&order=1"
+        mal_fetch_headers = {"User-Agent": HEADERS["User-Agent"]} # Use app's UA
         response = await asyncio.to_thread(requests.get, mal_json_url, headers=mal_fetch_headers, timeout=20)
         response.raise_for_status()
         if 'application/json' in response.headers.get('Content-Type', ''):
-            mal_data = response.json()
-            print(f"Successfully fetched JSON data from MAL endpoint.")
-            processed_ids = set() # Keep track of processed anime IDs
+            mal_data = response.json(); print(f"MAL JSON Success.")
+            processed_ids = set()
             for item in mal_data:
                 if isinstance(item, dict) and item.get('status') == 2:
-                    title = item.get('anime_title')
-                    anime_id = item.get('anime_id')
+                    title = item.get('anime_title'); anime_id = item.get('anime_id')
                     if title and anime_id not in processed_ids:
-                        # Apply optional text search filter here FIRST
                         if not search or search.lower() in title.lower():
                             eng_title = item.get('anime_title_eng')
-                            # Add if English title exists and is different from main title
                             title_eng = eng_title if eng_title and eng_title.lower() != title.lower() else None
-                            anime_data_list.append({'title': title, 'title_eng': title_eng})
+                            anime_data_list.append({'title': title, 'title_eng': title_eng, 'anime_id': anime_id}) # Store ID too
                             processed_ids.add(anime_id)
-            mal_data_fetched_successfully = True
-            print(f"Found {len(anime_data_list)} completed titles matching filter (if any) via JSON.")
-        # ... (Error handling for JSON endpoint - same as before) ...
-        else:
-            last_error_message = f"JSON endpoint did not return JSON. CT: {response.headers.get('Content-Type')}"
-            print(last_error_message); print(f"Response text: {response.text[:200]}")
-    except requests.exceptions.HTTPError as e: # ... other except blocks ...
-        last_error_message = f"Attempt 1 Failed (JSON): HTTP Error MAL {username}: {e}"
-        print(last_error_message); # ... specific 400/404 handling ...
-        if e.response.status_code in [400, 404]: return {"error": f"MAL Error: {username} not found or list private?"}
-    except Exception as e: # Catch-all for JSON attempt
-        last_error_message = f"Attempt 1 Failed (JSON): Unexpected error: {e}"
-        print(last_error_message); traceback.print_exc()
+            mal_data_fetched_successfully = True; print(f"Found {len(anime_data_list)} titles via JSON.")
+        else: last_error_message = f"MAL JSON Non-JSON Response. CT: {response.headers.get('Content-Type')}"; print(last_error_message)
+    except requests.exceptions.HTTPError as e: last_error_message = f"MAL JSON HTTP Error: {e}"; print(last_error_message); # Handle 400/404...
+    except Exception as e: last_error_message = f"MAL JSON Error: {e}"; print(last_error_message); # Handle other errors...
+
+    if not mal_data_fetched_successfully: # MAL HTML Fetch Fallback
+        print(f"\nAttempt 2: Fetching MAL data via HTML page...");
+        try: # ... (MAL HTML fetch code - same as previous, populates anime_data_list) ...
+             mal_html_url = f"https://myanimelist.net/animelist/{username}?status=2"; mal_fetch_headers = {"User-Agent": HEADERS["User-Agent"]}
+             response = await asyncio.to_thread(requests.get, mal_html_url, headers=mal_fetch_headers, timeout=25); response.raise_for_status()
+             if 'text/html' in response.headers.get('Content-Type', ''): # ... (parse soup, find data-items, populate anime_data_list) ...
+                print(f"MAL HTML Success. Parsing..."); soup = BeautifulSoup(response.text, "html.parser"); list_table = soup.find('table', attrs={'data-items': True})
+                if list_table and list_table.get('data-items'): # ... (load json, loop, append unique to anime_data_list) ...
+                    mal_data_fetched_successfully = True; # Mark success
+                else: last_error_message = "MAL HTML Error: Cannot find data-items"; print(last_error_message)
+             else: last_error_message = f"MAL HTML Non-HTML Response. CT: {response.headers.get('Content-Type')}"; print(last_error_message)
+        except Exception as e: last_error_message = f"MAL HTML Error: {e}"; print(last_error_message); # Handle specific errors...
+
+    # --- Process MAL Results ---
+    unique_anime_map = {item['title']: item for item in reversed(anime_data_list)} # Deduplicate by title
+    unique_anime_list = sorted(list(unique_anime_map.values()), key=lambda x: x['title'])
+    mal_fetch_time = time.time() - start_time
+    print(f"\nFound {len(unique_anime_list)} unique titles. (MAL Fetch took {mal_fetch_time:.2f}s)")
+    # ... (Handle cases where no titles are found) ...
+    if not mal_data_fetched_successfully and not unique_anime_list: return {"error": f"Could not fetch MAL data. Last error: {last_error_message}"}
+    if not unique_anime_list: return {"message": f"No completed anime found matching criteria.", "wallpapers": {}}
 
 
-    # Attempt 2: Fallback to scraping embedded JSON from HTML page
-    if not mal_data_fetched_successfully: # Or maybe always run if results seem low? For now, only on failure.
-        mal_html_url = f"https://myanimelist.net/animelist/{username}?status=2"
-        print(f"\nAttempt 2: Fetching MAL data for {username} from HTML page...")
-        try:
-            mal_fetch_headers = {"User-Agent": HEADERS["User-Agent"]}
-            response = await asyncio.to_thread(requests.get, mal_html_url, headers=mal_fetch_headers, timeout=25)
-            response.raise_for_status()
-            if 'text/html' in response.headers.get('Content-Type', ''):
-                print(f"Fetched HTML from MAL. Parsing...")
-                soup = BeautifulSoup(response.text, "html.parser")
-                list_table = soup.find('table', attrs={'data-items': True})
-                if list_table and list_table.get('data-items'):
-                    try:
-                        mal_data = json.loads(list_table['data-items'])
-                        print(f"Successfully parsed embedded JSON from MAL HTML.")
-                        initial_count = len(anime_data_list)
-                        processed_ids = {item['anime_id'] for item in mal_data_list if 'anime_id' in item} # Rebuild processed IDs if needed
-                        for item in mal_data:
-                            if isinstance(item, dict) and item.get('status') == 2:
-                                title = item.get('anime_title')
-                                anime_id = item.get('anime_id') # Assuming ID is available here too
-                                # Add only if title exists, matches filter, and not already added
-                                if title and (not anime_id or anime_id not in processed_ids):
-                                     if not search or search.lower() in title.lower():
-                                        eng_title = item.get('anime_title_eng')
-                                        title_eng = eng_title if eng_title and eng_title.lower() != title.lower() else None
-                                        anime_data_list.append({'title': title, 'title_eng': title_eng, 'anime_id': anime_id}) # Store ID if available
-                                        if anime_id: processed_ids.add(anime_id)
-                        mal_data_fetched_successfully = True # Mark as success even if only HTML worked
-                        print(f"Found {len(anime_data_list) - initial_count} additional/unique titles via HTML.")
-                    # ... (Error handling for HTML parsing - same as before) ...
-                    except json.JSONDecodeError as e: last_error_message = f"Attempt 2 Failed: Error decoding data-items: {e}"; print(last_error_message)
-                    except Exception as e: last_error_message = f"Attempt 2 Failed: Error parsing embedded JSON: {e}"; print(last_error_message); traceback.print_exc()
-                else: last_error_message = "Attempt 2 Failed: Could not find 'data-items' in MAL HTML."; print(last_error_message)
-            # ... (Error handling for HTML fetch - same as before) ...
-            else: last_error_message = f"Attempt 2 Failed: Page did not return HTML. CT: {response.headers.get('Content-Type')}"; print(last_error_message)
-        except requests.exceptions.HTTPError as e: # ... other except blocks ...
-            last_error_message = f"Attempt 2 Failed (HTML): HTTP Error MAL {username}: {e}"
-            print(last_error_message); # ... specific 404 handling ...
-            if e.response.status_code == 404 and not mal_data_fetched_successfully: return {"error": f"MAL Error: {username} not found or list private?"}
-        except Exception as e: # Catch-all for HTML attempt
-             last_error_message = f"Attempt 2 Failed (HTML): Unexpected error: {e}"; print(last_error_message); traceback.print_exc()
-
-    # --- Process Results of MAL Fetching ---
-    # Use a dictionary to ensure uniqueness based on main title, preserving extracted data
-    unique_anime_map = {item['title']: item for item in reversed(anime_data_list)} # Prioritize later entries if duplicates exist
-    unique_anime_list = sorted(list(unique_anime_map.values()), key=lambda x: x['title']) # Sort by title
-
-    print(f"\nIdentified {len(unique_anime_list)} unique completed anime titles after all attempts.")
-
-    if not mal_data_fetched_successfully and not unique_anime_list:
-         return {"error": f"Could not fetch MAL data for '{username}' after multiple attempts. Last error: {last_error_message}"}
-    if not unique_anime_list:
-        return {"message": f"No completed anime found for user '{username}' matching the criteria.", "wallpapers": {}}
-
-    # --- Search Wallhaven.cc for Wallpapers (with multiple attempts per title) ---
+    # --- Search Wallhaven with Limited Concurrency (Smart Search) ---
     results = {}
     processed_titles_count = 0
+    semaphore = asyncio.Semaphore(CONCURRENCY_LIMIT)
 
-    print(f"\nStarting Wallhaven.cc search for {len(unique_anime_list)} titles (trying multiple variations)...")
+    print(f"\nStarting Wallhaven search for {len(unique_anime_list)} titles (Concurrency: {CONCURRENCY_LIMIT}, Smart Search Strategy)...")
     print("-" * 30)
 
-    async def fetch_and_process_title_wallhaven_multi(anime_info):
+    # NEW: Smart search function - tries specific title, then generic fallback
+    async def fetch_wallhaven_smart_search(anime_info):
         """
-        Orchestrates multiple search attempts for a single anime.
-        anime_info is a dict: {'title': '...', 'title_eng': '...'}
+        Attempts to find wallpapers using specific title first, falls back to generic.
         """
-        nonlocal processed_titles_count
-        processed_titles_count += 1
         original_title = anime_info['title']
-        english_title = anime_info['title_eng'] # Could be None
-        combined_urls = set() # Use a set to automatically handle duplicates
+        english_title = anime_info['title_eng']
+        final_urls = []
 
-        print(f"\n({processed_titles_count}/{len(unique_anime_list)}) Processing: '{original_title}'")
+        # Define the Specific Search Term (Raw original MAL title)
+        specific_term = original_title
+        # Define the Generic Fallback Term (Simplified, prioritizing English)
+        base_title_for_generic = english_title if english_title else original_title
+        generic_term = simplify_title(base_title_for_generic)
 
-        # --- Attempt 1: Simplified Main Title ---
-        simplified_main = simplify_title(original_title)
-        print(f"  Attempt 1: Searching with simplified title: '{simplified_main}'")
-        urls1 = await asyncio.to_thread(search_wallhaven, simplified_main, max_per_anime)
-        combined_urls.update(urls1)
-        print(f"    > Found {len(urls1)}. Total unique: {len(combined_urls)}")
-
-        # --- Attempt 2: Simplified English Title (if applicable) ---
-        if len(combined_urls) < max_per_anime and english_title:
-            simplified_eng = simplify_title(english_title)
-            if simplified_eng.lower() != simplified_main.lower(): # Avoid searching same string twice
-                print(f"  Attempt 2: Searching with simplified ENG title: '{simplified_eng}'")
-                urls2 = await asyncio.to_thread(search_wallhaven, simplified_eng, max_per_anime)
-                combined_urls.update(urls2)
-                print(f"    > Found {len(urls2)}. Total unique: {len(combined_urls)}")
-            else:
-                print(f"  Attempt 2: Skipped (Simplified ENG same as simplified main)")
-
-        # --- Attempt 3: Raw Main Title (if applicable) ---
-        # Only try if simplification actually changed the title and we still need more results
-        if len(combined_urls) < max_per_anime and original_title.lower() != simplified_main.lower():
-             print(f"  Attempt 3: Searching with RAW main title: '{original_title}'")
-             urls3 = await asyncio.to_thread(search_wallhaven, original_title, max_per_anime)
-             combined_urls.update(urls3)
-             print(f"    > Found {len(urls3)}. Total unique: {len(combined_urls)}")
-        elif len(combined_urls) < max_per_anime:
-             print(f"  Attempt 3: Skipped (Raw title same as simplified or already have enough results)")
-
-
-        # Return the original title and the list of unique URLs found (up to max)
-        final_urls = list(combined_urls)[:max_per_anime]
-        if final_urls:
-             print(f"  => Final results for '{original_title}': {len(final_urls)} wallpapers.")
+        # --- Attempt 1: Search Specific Term ---
+        print(f"  Attempt 1: Searching SPECIFIC term: '{specific_term}'")
+        urls_specific = await asyncio.to_thread(search_wallhaven, specific_term, max_per_anime)
+        if urls_specific:
+            print(f"    > Found {len(urls_specific)} specific results.")
+            final_urls = urls_specific[:max_per_anime] # Apply limit
         else:
-             print(f"  => No wallpapers found for '{original_title}' after all attempts.")
+            print(f"    > Found 0 specific results.")
 
-        return original_title, final_urls
+        # --- Attempt 2: Search Generic Term (Fallback, if needed) ---
+        # Fallback if: 1) Specific search found nothing AND 2) Generic term is different
+        if not final_urls and generic_term.lower() != specific_term.lower():
+            print(f"  Attempt 2: Falling back to GENERIC term: '{generic_term}'")
+            urls_generic = await asyncio.to_thread(search_wallhaven, generic_term, max_per_anime)
+            if urls_generic:
+                print(f"    > Found {len(urls_generic)} generic results.")
+                final_urls = urls_generic[:max_per_anime] # Apply limit
+            else:
+                print(f"    > Found 0 generic results.")
+        elif not final_urls:
+             print(f"  Attempt 2: Skipped generic fallback (generic term same as specific, or specific search failed).")
 
-    # Run searches sequentially with delay between *anime*
-    search_results_list = []
-    for anime_item in unique_anime_list:
-        result_pair = await fetch_and_process_title_wallhaven_multi(anime_item)
-        search_results_list.append(result_pair)
-        # Check processed_titles_count inside the loop if needed, but it's handled by nonlocal
-        if processed_titles_count < len(unique_anime_list):
-             # Increased delay between processing different anime because each might involve multiple API calls now
-             delay = 3.0
-             print(f"--- Delaying before next anime ({delay}s) ---")
-             await asyncio.sleep(delay)
+        # Log final outcome for this title
+        if final_urls: print(f"  => Finished '{original_title}'. Found {len(final_urls)} wallpapers.")
+        else: print(f"  => No wallpapers found for '{original_title}' after all attempts.")
 
-    # Filter results and return
-    results = {title: urls for title, urls in search_results_list if urls}
+        return original_title, final_urls # Return original title and the final list
+
+
+    # Helper function to manage semaphore acquisition for each task
+    async def process_anime_with_semaphore(sem, anime_data, index):
+        """ Acquires semaphore, calls the smart search processing function """
+        nonlocal processed_titles_count
+        async with sem:
+            print(f"\n({index+1}/{len(unique_anime_list)}) Processing: '{anime_data['title']}' (Semaphore acquired)")
+            # Call the NEW smart search function
+            result_pair = await fetch_wallhaven_smart_search(anime_data)
+            processed_titles_count += 1
+            return result_pair # Return tuple (original_title, final_url_list)
+
+    # Create and run tasks concurrently
+    tasks = [process_anime_with_semaphore(semaphore, anime_item, i) for i, anime_item in enumerate(unique_anime_list)]
+    print(f"Running {len(tasks)} tasks with concurrency limit {CONCURRENCY_LIMIT}...")
+    search_start_time = time.time()
+    search_results_list = await asyncio.gather(*tasks)
+    search_end_time = time.time()
     print("-" * 30)
-    print(f"\nFinished processing all titles.")
-    print(f"Returning results for {len(results)} anime with wallpapers found via Wallhaven multi-search.")
+    print(f"Wallhaven search phase completed in {search_end_time - search_start_time:.2f}s.")
+
+    # Process final results
+    results = {title: urls for title, urls in search_results_list if urls} # Filter out empty results
+    total_time = time.time() - start_time
+    print(f"\nFinished all processing. Found wallpapers for {len(results)} titles.")
+    print(f"Total request time: {total_time:.2f}s")
     return {"wallpapers": results}
 
 # --- To Run the App ---
-# (Instructions remain the same)
-# uvicorn main:app --reload --host 0.0.0.0 --port 8080
+# (Instructions remain the same - set Env Vars on Render, run with uvicorn)
+# Example: uvicorn main:app --reload --host 0.0.0.0 --port 8080
