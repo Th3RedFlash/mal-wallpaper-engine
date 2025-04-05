@@ -1,13 +1,12 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import requests
-import xml.etree.ElementTree as ET
 from bs4 import BeautifulSoup
 
-# Create FastAPI app instance
+# Initialize the FastAPI app
 app = FastAPI()
 
-# Add CORS middleware to allow cross-origin requests
+# CORS middleware setup
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
