@@ -25,8 +25,8 @@ def get_wallpapers(username: str, search: str = None, max_per_anime: int = 3):
         )
     }
 
-    # MAL URL to fetch the user's anime list (completed)
-    mal_url = f"https://myanimelist.net/animelist/{username}?status=1"
+    # Fetch the completed anime list (status=2 for Completed anime)
+    mal_url = f"https://myanimelist.net/animelist/{username}?status=2"
     response = requests.get(mal_url, headers=headers)
 
     # Log response status code
@@ -38,6 +38,7 @@ def get_wallpapers(username: str, search: str = None, max_per_anime: int = 3):
     soup = BeautifulSoup(response.text, "html.parser")
     anime_titles = []
 
+    # Loop through each anime in the list and collect titles
     for item in soup.select(".animelist .list-item"):
         title_tag = item.select_one(".title > a")
         if title_tag:
@@ -65,7 +66,7 @@ def get_wallpapers(username: str, search: str = None, max_per_anime: int = 3):
             html = requests.get(wallhaven_url, headers=headers, timeout=10).text
             soup = BeautifulSoup(html, "html.parser")
             thumbs = soup.select("figure > a.preview")
-            print(f"Found {len(thumbs)} wallpapers for {title}")
+            print(f"Found {len(thumbs)} wallpapers for {title}")  # Log number of wallpapers found
         except Exception as e:
             print(f"Error fetching wallpapers for {title}: {e}")
             continue
