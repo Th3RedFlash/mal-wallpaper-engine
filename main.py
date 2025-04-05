@@ -3,10 +3,10 @@ from fastapi.middleware.cors import CORSMiddleware
 import requests
 from bs4 import BeautifulSoup
 
-# Initialize the FastAPI app
+# Initialize FastAPI app
 app = FastAPI()
 
-# CORS middleware setup
+# Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -25,12 +25,16 @@ def get_wallpapers(username: str, search: str = None, max_per_anime: int = 3):
         )
     }
 
+    # MAL URL to fetch the user's anime list (completed)
     mal_url = f"https://myanimelist.net/animelist/{username}?status=1"
     response = requests.get(mal_url, headers=headers)
 
+    # Log response status code
+    print(f"Fetched MAL data for {username}, status code: {response.status_code}")
     if response.status_code != 200:
         return {"error": "Could not fetch MAL data"}
 
+    # Parse the anime list from the HTML response
     soup = BeautifulSoup(response.text, "html.parser")
     anime_titles = []
 
@@ -41,8 +45,15 @@ def get_wallpapers(username: str, search: str = None, max_per_anime: int = 3):
             if not search or search.lower() in title.lower():
                 anime_titles.append(title)
 
+    # Log parsed anime titles
+    print(f"Parsed anime titles: {anime_titles}")
+
+    if not anime_titles:
+        return {"error": "No completed anime found for this user."}
+
     results = {}
 
+    # For each anime, search for wallpapers
     for title in anime_titles:
         query = title.replace(" ", "+")
         wallhaven_url = (
@@ -54,11 +65,14 @@ def get_wallpapers(username: str, search: str = None, max_per_anime: int = 3):
             html = requests.get(wallhaven_url, headers=headers, timeout=10).text
             soup = BeautifulSoup(html, "html.parser")
             thumbs = soup.select("figure > a.preview")
-        except:
+            print(f"Found {len(thumbs)} wallpapers for {title}")
+        except Exception as e:
+            print(f"Error fetching wallpapers for {title}: {e}")
             continue
 
         images = []
 
+        # Check each wallpaper for valid images
         for thumb in thumbs[:max_per_anime * 3]:
             try:
                 wallpaper_page_url = thumb["href"]
@@ -72,10 +86,12 @@ def get_wallpapers(username: str, search: str = None, max_per_anime: int = 3):
                         images.append(full_img_url)
                 if len(images) >= max_per_anime:
                     break
-            except:
+            except Exception as e:
+                print(f"Error parsing image for {title}: {e}")
                 continue
 
         if images:
             results[title] = images
 
+    print(f"Returning results: {results}")
     return results
