@@ -2,6 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import requests
 from bs4 import BeautifulSoup
+from urllib.parse import quote_plus
 
 # Initialize FastAPI app
 app = FastAPI()
@@ -29,8 +30,10 @@ def get_wallpapers(username: str, search: str = None, max_per_anime: int = 3):
     mal_url = f"https://myanimelist.net/animelist/{username}?status=2"
     response = requests.get(mal_url, headers=headers)
 
-    # Log response status code
+    # Log the raw HTML content for debugging
     print(f"Fetched MAL data for {username}, status code: {response.status_code}")
+    print(response.text)  # Log the HTML content from MAL for debugging
+
     if response.status_code != 200:
         return {"error": "Could not fetch MAL data"}
 
@@ -38,7 +41,7 @@ def get_wallpapers(username: str, search: str = None, max_per_anime: int = 3):
     soup = BeautifulSoup(response.text, "html.parser")
     anime_titles = []
 
-    # Corrected CSS selector to match the anime titles inside <a> tags in <td class="data title clearfix">
+    # Updated CSS selector to match the correct link tag for anime titles
     for item in soup.select("td.data.title.clearfix"):
         title_tag = item.select_one("a.link.sort")  # Corrected selector for the anime title
         if title_tag:
@@ -56,7 +59,7 @@ def get_wallpapers(username: str, search: str = None, max_per_anime: int = 3):
 
     # For each anime, search for wallpapers
     for title in anime_titles:
-        query = title.replace(" ", "+")
+        query = quote_plus(title)  # URL encode the title
         wallhaven_url = (
             f"https://wallhaven.cc/search?q={query}&categories=001"
             "&purity=100&atleast=1920x1080&sorting=favorites"
