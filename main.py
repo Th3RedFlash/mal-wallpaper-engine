@@ -1,4 +1,4 @@
-# main.py (Updated with 'Season' removal logic + wallpapers.com scraping)
+# main.py (Corrected Import Location)
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -7,7 +7,9 @@ from bs4 import BeautifulSoup
 from urllib.parse import quote_plus
 import json
 import time
-import re # Keep this import
+import re
+import asyncio # <--- MOVED IMPORT TO THE TOP
+import traceback # <--- Import traceback for detailed error logging
 
 # Initialize FastAPI app
 app = FastAPI()
@@ -212,7 +214,6 @@ def search_wallpapers_com(title, max_results):
          return []
     except Exception as e_general:
         # Catch any other unexpected errors during the search process
-        import traceback
         print(f"[wallpapers.com] Unexpected error during search for '{title}': {e_general}")
         traceback.print_exc() # Print full traceback for debugging
         return []
@@ -227,15 +228,16 @@ async def get_wallpapers(username: str, search: str = None, max_per_anime: int =
     anime_titles = []
     mal_data_fetched_successfully = False
     last_error_message = "Unknown error during MAL fetch." # Placeholder
+    response = None # Define response variable outside try block
 
     # --- Fetch and Parse MAL Data ---
-    # (Using the robust two-attempt logic from your provided code)
     # Attempt 1: Modern JSON endpoint
-    mal_json_url = f"https://myanimelist.net/animelist/{username}/load.json?status=2&offset=0&order=1" # Added order=1 just in case
+    mal_json_url = f"https://myanimelist.net/animelist/{username}/load.json?status=2&offset=0&order=1"
     print(f"Attempt 1: Fetching MAL data for {username} from JSON endpoint: {mal_json_url}")
     try:
         mal_fetch_headers = {"User-Agent": HEADERS["User-Agent"]}
-        response = await asyncio.to_thread(requests.get, mal_json_url, headers=mal_fetch_headers, timeout=20) # Increased timeout
+        # Use asyncio.to_thread for blocking requests call
+        response = await asyncio.to_thread(requests.get, mal_json_url, headers=mal_fetch_headers, timeout=20)
         response.raise_for_status()
         if 'application/json' in response.headers.get('Content-Type', ''):
             mal_data = response.json()
@@ -260,19 +262,19 @@ async def get_wallpapers(username: str, search: str = None, max_per_anime: int =
         if e.response.status_code == 400 or e.response.status_code == 404:
              print(">>> MAL API returned 400/404, likely invalid username or private list.")
              return {"error": f"Could not fetch MAL data for '{username}'. Is the username correct and the list public?"}
-        # Other HTTP errors might warrant fallback
     except requests.exceptions.RequestException as e:
         last_error_message = f"Attempt 1 Failed (JSON endpoint): Network Error fetching MAL data for {username}: {e}"
         print(last_error_message)
     except json.JSONDecodeError as e:
         last_error_message = f"Attempt 1 Failed (JSON endpoint): Error decoding JSON response: {e}"
         print(last_error_message)
-        print(f"Response text: {response.text[:200]}")
+        # Print response text if response object exists
+        if response:
+             print(f"Response text: {response.text[:200]}")
     except Exception as e:
-        import traceback
         last_error_message = f"Attempt 1 Failed (JSON endpoint): An unexpected error occurred: {e}"
         print(last_error_message)
-        traceback.print_exc()
+        traceback.print_exc() # Print full traceback
 
     # Attempt 2: Fallback to scraping embedded JSON from HTML page
     if not mal_data_fetched_successfully:
@@ -280,7 +282,8 @@ async def get_wallpapers(username: str, search: str = None, max_per_anime: int =
         print(f"\nAttempt 2: Fetching MAL data for {username} from HTML page: {mal_html_url}")
         try:
             mal_fetch_headers = {"User-Agent": HEADERS["User-Agent"]}
-            response = await asyncio.to_thread(requests.get, mal_html_url, headers=mal_fetch_headers, timeout=25) # Longer timeout for HTML
+            # Use asyncio.to_thread for blocking requests call
+            response = await asyncio.to_thread(requests.get, mal_html_url, headers=mal_fetch_headers, timeout=25)
             response.raise_for_status()
             if 'text/html' in response.headers.get('Content-Type', ''):
                 print(f"Fetched HTML from MAL (status code: {response.status_code}). Parsing embedded JSON.")
@@ -306,10 +309,9 @@ async def get_wallpapers(username: str, search: str = None, max_per_anime: int =
                         last_error_message = f"Attempt 2 Failed: Error decoding JSON from data-items attribute: {e}"
                         print(last_error_message)
                     except Exception as e:
-                        import traceback
                         last_error_message = f"Attempt 2 Failed: An unexpected error occurred parsing embedded JSON: {e}"
                         print(last_error_message)
-                        traceback.print_exc()
+                        traceback.print_exc() # Print full traceback
                 else:
                     last_error_message = "Attempt 2 Failed: Could not find 'data-items' attribute in the MAL HTML table."
                     print(last_error_message)
@@ -330,10 +332,9 @@ async def get_wallpapers(username: str, search: str = None, max_per_anime: int =
             last_error_message = f"Attempt 2 Failed (HTML page): Network Error fetching MAL data for {username}: {e}"
             print(last_error_message)
         except Exception as e:
-            import traceback
             last_error_message = f"Attempt 2 Failed (HTML page): An unexpected error occurred: {e}"
             print(last_error_message)
-            traceback.print_exc()
+            traceback.print_exc() # Print full traceback
 
     # --- Process Results of MAL Fetching ---
     # Use set for uniqueness, then sort for consistent processing order
@@ -360,15 +361,14 @@ async def get_wallpapers(username: str, search: str = None, max_per_anime: int =
     print(f"\nStarting wallpapers.com search for {len(unique_raw_titles)} titles (using simplified names)...")
     print("-" * 30) # Separator
 
-    # Iterate using the original titles for consistent keys in the results dictionary
-    import asyncio # Need asyncio for running blocking calls in thread
-
+    # Define the helper function inside get_wallpapers or ensure it can access necessary scope
     async def fetch_and_process_title(original_title):
-        nonlocal processed_titles_count
-        processed_titles_count += 1
+        # Make processed_titles_count nonlocal if fetch_and_process_title is defined inside get_wallpapers
+        # nonlocal processed_titles_count
+        current_count = processed_titles_count + 1 # Use a local var for logging index to avoid race conditions if ever made concurrent
         simplified = title_simplification_map[original_title]
 
-        print(f"\n({processed_titles_count}/{len(unique_raw_titles)}) Processing: '{original_title}'")
+        print(f"\n({current_count}/{len(unique_raw_titles)}) Processing: '{original_title}'")
         if original_title != simplified:
             print(f"  -> Simplified to: '{simplified}' for search.")
         else:
@@ -386,22 +386,18 @@ async def get_wallpapers(username: str, search: str = None, max_per_anime: int =
                  return original_title, [] # Return empty list if none found
 
         except Exception as e_search:
-            import traceback
             print(f"!!! An unexpected error occurred during wallpapers.com search processing for '{original_title}' (simplified: '{simplified}'): {e_search}")
             traceback.print_exc() # Print full traceback
             return original_title, [] # Return empty list on error for this title
-
-
-    # Run the searches concurrently (adjust concurrency as needed to avoid rate limits)
-    # tasks = [fetch_and_process_title(title) for title in unique_raw_titles]
-    # search_results = await asyncio.gather(*tasks)
 
     # Run the searches sequentially to be kinder to the server and avoid rate limits
     search_results_list = []
     for title in unique_raw_titles:
         result_pair = await fetch_and_process_title(title)
         search_results_list.append(result_pair)
+        processed_titles_count += 1 # Increment counter after processing
         if processed_titles_count < len(unique_raw_titles):
+             print(f"--- Delaying before next title ({2.5}s) ---")
              await asyncio.sleep(2.5) # Add delay between processing each ANIME TITLE
 
 
@@ -414,18 +410,9 @@ async def get_wallpapers(username: str, search: str = None, max_per_anime: int =
     return {"wallpapers": results} # Return the final dictionary
 
 
-# --- To Run the App (Requires asyncio context now for MAL fetch) ---
+# --- To Run the App ---
 # 1. Save this code as main.py
 # 2. Install necessary libraries:
-#    pip install fastapi "uvicorn[standard]" requests beautifulsoup4 httpx # Added httpx if needed for async requests in future
+#    pip install fastapi "uvicorn[standard]" requests beautifulsoup4 httpx # httpx might not be strictly needed now
 # 3. Run from terminal in the same directory as the file:
 #    uvicorn main:app --reload --host 0.0.0.0 --port 8080 # Example using different port
-# 4. Open your browser to http://127.0.0.1:8080/docs (or your server IP/port) to test.
-
-# Note: Added async/await to the main endpoint and used asyncio.to_thread
-# for the blocking 'requests' calls during MAL fetching and wallpaper searching.
-# This prevents the server from being blocked during network I/O.
-# Added sequential processing with delays for wallpaper search to reduce load/rate limit risk.
-
-# Import asyncio at the top if not already done
-import asyncio
