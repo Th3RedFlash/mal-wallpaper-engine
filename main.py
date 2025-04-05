@@ -38,9 +38,9 @@ def get_wallpapers(username: str, search: str = None, max_per_anime: int = 3):
     soup = BeautifulSoup(response.text, "html.parser")
     anime_titles = []
 
-    # Loop through each anime in the list and collect titles
+    # Updated CSS selector to match the correct link tag for anime titles
     for item in soup.select(".animelist .list-item"):
-        title_tag = item.select_one(".title > a")
+        title_tag = item.select_one("a.link.sort")  # Corrected selector
         if title_tag:
             title = title_tag.get_text(strip=True)
             if not search or search.lower() in title.lower():
