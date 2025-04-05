@@ -1,8 +1,12 @@
+# main.py (Corrected Backend Code)
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import requests
 from bs4 import BeautifulSoup
 from urllib.parse import quote_plus
+import json # Import the json library
+import time # Import time for potential delays
 
 # Initialize FastAPI app
 app = FastAPI()
@@ -10,90 +14,72 @@ app = FastAPI()
 # Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"],  # Allow all origins for simplicity (adjust for production)
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+# Define a standard User-Agent
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/120 Safari/537.36" # Use a plausible, common browser UA
+    )
+}
+
 @app.get("/wallpapers")
 def get_wallpapers(username: str, search: str = None, max_per_anime: int = 3):
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/120 Safari/537.36"
-        )
-    }
-
-    # Fetch the completed anime list (status=2 for Completed anime)
-    mal_url = f"https://myanimelist.net/animelist/{username}?status=2"
-    response = requests.get(mal_url, headers=headers)
-
-    # Log the response status code
-    print(f"Fetched MAL data for {username}, status code: {response.status_code}")
-    if response.status_code != 200:
-        return {"error": "Could not fetch MAL data"}
-
-    # Parse the anime list from the HTML response
-    soup = BeautifulSoup(response.text, "html.parser")
+    """
+    Fetches completed anime for a MAL user and finds wallpapers on Wallhaven.
+    """
     anime_titles = []
 
-    # Updated CSS selector to correctly extract anime titles
-    for item in soup.select("td.data.title.clearfix"):
-        title_tag = item.select_one("a.link.sort")  # Corrected selector for the anime title
-        if title_tag:
-            title = title_tag.get_text(strip=True)
-            if not search or search.lower() in title.lower():
-                anime_titles.append(title)
+    # --- Fetch and Parse MAL Data ---
+    mal_url = f"https://myanimelist.net/animelist/{username}/load.json?status=2&offset=0"
+    # Note: Using the 'load.json' endpoint is often more reliable if available and public
+    # If the above doesn't work reliably or requires auth, fall back to scraping the HTML page's JSON data:
+    # mal_url = f"https://myanimelist.net/animelist/{username}?status=2"
 
-    # Log parsed anime titles
-    print(f"Parsed anime titles: {anime_titles}")
+    print(f"Attempting to fetch MAL data for {username} from: {mal_url}")
 
-    if not anime_titles:
-        return {"error": "No completed anime found for this user."}
+    try:
+        response = requests.get(mal_url, headers=HEADERS, timeout=15) # Increased timeout
+        response.raise_for_status() # Raise HTTPError for bad responses (4xx or 5xx)
 
-    results = {}
+        # Check if we got JSON directly (preferred)
+        if 'application/json' in response.headers.get('Content-Type', ''):
+            mal_data = response.json()
+            print(f"Successfully fetched JSON data directly from MAL endpoint.")
+            # Structure of the JSON might vary, adjust keys accordingly
+            # Assuming it's a list of dictionaries, each representing an anime
+            for item in mal_data:
+                 # Check if the status indicates completed (usually 2)
+                 # The exact key for status might differ ('status', 'list_status', etc.)
+                if item.get('status') == 2:
+                    title = item.get('anime_title') # Adjust key if needed
+                    if title:
+                         if not search or search.lower() in title.lower():
+                             anime_titles.append(title)
 
-    # For each anime, search for wallpapers
-    for title in anime_titles:
-        query = quote_plus(title)  # URL encode the title to handle special characters
-        wallhaven_url = (
-            f"https://wallhaven.cc/search?q={query}&categories=001"
-            "&purity=100&atleast=1920x1080&sorting=favorites"
-        )
+        # Fallback: If we got HTML, try to find the embedded JSON
+        elif 'text/html' in response.headers.get('Content-Type', ''):
+            print(f"Fetched HTML from MAL (status code: {response.status_code}). Parsing embedded JSON.")
+            soup = BeautifulSoup(response.text, "html.parser")
+            # Find the table that contains the data-items attribute
+            list_table = soup.find('table', class_='list-table')
 
-        try:
-            html = requests.get(wallhaven_url, headers=headers, timeout=10).text
-            soup = BeautifulSoup(html, "html.parser")
-            thumbs = soup.select("figure > a.preview")
-            print(f"Found {len(thumbs)} wallpapers for {title}")  # Log number of wallpapers found
-        except Exception as e:
-            print(f"Error fetching wallpapers for {title}: {e}")
-            continue
-
-        images = []
-
-        # Check each wallpaper for valid images
-        for thumb in thumbs[:max_per_anime * 3]:
-            try:
-                wallpaper_page_url = thumb["href"]
-                wp_html = requests.get(wallpaper_page_url, headers=headers, timeout=10).text
-                wp_soup = BeautifulSoup(wp_html, "html.parser")
-                full_img_tag = wp_soup.select_one("img#wallpaper")
-                if full_img_tag:
-                    full_img_url = full_img_tag.get("src")
-                    check = requests.head(full_img_url, headers=headers, timeout=5)
-                    if check.status_code == 200:
-                        images.append(full_img_url)
-                if len(images) >= max_per_anime:
-                    break
-            except Exception as e:
-                print(f"Error parsing image for {title}: {e}")
-                continue
-
-        if images:
-            results[title] = images
-
-    print(f"Returning results: {results}")
-    return results
+            if list_table and 'data-items' in list_table.attrs:
+                try:
+                    mal_data = json.loads(list_table['data-items'])
+                    print(f"Successfully parsed embedded JSON from MAL HTML.")
+                    # Iterate through the parsed JSON data
+                    for item in mal_data:
+                         # Check if the status indicates completed (status = 2)
+                        if item.get('status') == 2:
+                            # Extract the anime title (key might be 'anime_title' or similar)
+                            title = item.get('anime_title')
+                            if title:
+                                # Apply optional search filter
+                                if not search or
