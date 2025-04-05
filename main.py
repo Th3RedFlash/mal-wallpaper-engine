@@ -13,8 +13,7 @@ import traceback
 import os
 
 # --- Configuration ---
-# Default to 1 for safety if ENV VAR not set. User MUST set it lower in Render if 3+ caused issues.
-CONCURRENCY_LIMIT = int(os.environ.get("WALLHAVEN_CONCURRENCY", 1))
+CONCURRENCY_LIMIT = int(os.environ.get("WALLHAVEN_CONCURRENCY", 1)) # Default LOW (1)
 WALLHAVEN_API_KEY = os.environ.get("WALLHAVEN_API_KEY", None)
 
 # Log API Key status AND Concurrency Limit on startup
@@ -23,15 +22,14 @@ if WALLHAVEN_API_KEY:
     print(f"STARTUP: Wallhaven API Key found and will be used.")
 else:
     print(f"STARTUP: Wallhaven API Key *not* found. Using default rate limits.")
-# Explicitly log the final concurrency value being used
-print(f"STARTUP: Concurrency limit set to: {CONCURRENCY_LIMIT}") # Added this log
+print(f"STARTUP: Concurrency limit set to: {CONCURRENCY_LIMIT}")
 if CONCURRENCY_LIMIT > 5 and not WALLHAVEN_API_KEY:
     print("STARTUP WARNING: Concurrency > 5 without an API key might easily hit rate limits!")
 elif CONCURRENCY_LIMIT > 15 and WALLHAVEN_API_KEY:
      print("STARTUP WARNING: Concurrency > 15 even with API key might hit rate limits, monitor closely.")
 elif CONCURRENCY_LIMIT <= 0:
      print("STARTUP ERROR: Concurrency limit must be >= 1. Using 1.")
-     CONCURRENCY_LIMIT = 1 # Force minimum of 1
+     CONCURRENCY_LIMIT = 1
 print("-" * 31)
 
 
@@ -40,11 +38,7 @@ app = FastAPI()
 
 # Add CORS middleware
 app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"],
 )
 
 # Define standard Headers (Includes API Key if set)
@@ -53,71 +47,38 @@ HEADERS = {
 }
 if WALLHAVEN_API_KEY:
     HEADERS['X-API-Key'] = WALLHAVEN_API_KEY
-    # print("DEBUG: Using Wallhaven API Key in headers.") # Keep commented out unless debugging key issues
 
 
 # --- Title Simplification Function ---
 def simplify_title(title):
-    """
-    Aggressively simplifies an anime title for generic searching.
-    Removes season/part indicators, subtitles after colon+space, etc.
-    """
-    title = title.strip()
-    match_colon = re.search(r':\s', title)
-    if match_colon:
-        title = title[:match_colon.start()].strip()
-    cleaned_title = re.split(
-        r'\s+\b(?:Season|Part|Cour|Movies?|Specials?|OVAs?|Partie|Saison|Staffel|The Movie|Movie|Film|\d{1,2})\b',
-        title,
-        maxsplit=1,
-        flags=re.IGNORECASE
-    )[0]
+    """ Aggressively simplifies an anime title for generic searching. """
+    title = title.strip(); match_colon = re.search(r':\s', title)
+    if match_colon: title = title[:match_colon.start()].strip()
+    cleaned_title = re.split(r'\s+\b(?:Season|Part|Cour|Movies?|Specials?|OVAs?|Partie|Saison|Staffel|The Movie|Movie|Film|\d{1,2})\b', title, maxsplit=1, flags=re.IGNORECASE)[0]
     cleaned_title = re.sub(r'\s*[:\-]\s*$', '', cleaned_title).strip()
-    if re.match(r'.+\s+\d+$', cleaned_title):
-         cleaned_title = re.split(r'\s+\d+$', cleaned_title)[0].strip()
+    if re.match(r'.+\s+\d+$', cleaned_title): cleaned_title = re.split(r'\s+\d+$', cleaned_title)[0].strip()
     return cleaned_title if cleaned_title else title
-
 
 # --- Wallpaper Search Function (Wallhaven.cc API - performs ONE search) ---
 def search_wallhaven(search_term, max_results_limit): # max_results_limit not used here
     """ Performs a single search on Wallhaven.cc API for a given search term. """
     print(f"  [Wallhaven Search] Querying API for: '{search_term}'")
-    image_urls = []
-    search_url = "https://wallhaven.cc/api/v1/search"
-    params = {
-        'q': search_term,
-        'categories': '010', # Anime
-        'purity': '100',     # SFW (Change to '110' for SFW+Sketchy if desired)
-        'sorting': 'relevance',
-        'order': 'desc',
-    }
+    image_urls = []; search_url = "https://wallhaven.cc/api/v1/search"
+    params = { 'q': search_term, 'categories': '010', 'purity': '100', 'sorting': 'relevance', 'order': 'desc' }
     try:
-        # Keep delay before each API call to space requests.
-        time.sleep(1.0) # Using 1.0s delay
-
-        response = requests.get(search_url, params=params, headers=HEADERS, timeout=20)
-        response.raise_for_status() # Raise HTTPError for bad responses (4xx/5xx)
-        data = response.json()
-
+        time.sleep(1.0) # Keep delay
+        response = requests.get(search_url, params=params, headers=HEADERS, timeout=20); response.raise_for_status(); data = response.json()
         if data and 'data' in data and isinstance(data['data'], list):
-            results_found = len(data['data'])
-            print(f"    -> API returned {results_found} results.")
+            results_found = len(data['data']); print(f"    -> API returned {results_found} results.")
             image_urls = [item['path'] for item in data['data'] if 'path' in item and isinstance(item['path'], str)]
             print(f"    -> Extracted {len(image_urls)} wallpaper URLs.")
-        else:
-            print(f"    -> No 'data' array found or invalid response structure.")
+        else: print(f"    -> No 'data' array found or invalid response.")
         return image_urls
-
-    except requests.exceptions.HTTPError as e_http:
-        print(f"  [WH Search] HTTP Error searching for '{search_term}': {e_http}")
-        if e_http.response.status_code == 429: print(">>> Rate limit likely hit!")
-        try: print(f"      Response Body: {e_http.response.text[:200]}") # Log error response
-        except: pass
-        return []
-    except requests.exceptions.Timeout: print(f"  [WH Search] Timeout searching for '{search_term}'"); return []
-    except requests.exceptions.RequestException as e_req: print(f"  [WH Search] Network Error for '{search_term}': {e_req}"); return []
-    except json.JSONDecodeError as e_json: print(f"  [WH Search] Error decoding JSON for '{search_term}': {e_json}"); print(f"      Response text: {response.text[:200]}"); return []
-    except Exception as e_general: print(f"  [WH Search] Unexpected error for '{search_term}': {e_general}"); traceback.print_exc(); return []
+    except requests.exceptions.HTTPError as e: print(f"  [WH Search] HTTP Error '{search_term}': {e}"); return []
+    except requests.exceptions.Timeout: print(f"  [WH Search] Timeout '{search_term}'"); return []
+    except requests.exceptions.RequestException as e: print(f"  [WH Search] Network Error '{search_term}': {e}"); return []
+    except json.JSONDecodeError as e: print(f"  [WH Search] JSON Error '{search_term}': {e}"); return []
+    except Exception as e: print(f"  [WH Search] Unexpected error '{search_term}': {e}"); traceback.print_exc(); return []
 
 
 # --- Main Endpoint ---
@@ -128,7 +89,7 @@ async def get_wallpapers(username: str, search: str = None, max_per_anime: int =
     with LIMITED CONCURRENCY and Backend Duplicate Filtering.
     """
     start_time = time.time()
-    anime_data_list = [] # Stores {'title': '...', 'title_eng': '...'}
+    anime_data_list = [] # Stores {'title': '...', 'title_eng': '...', 'anime_id': ...}
     mal_data_fetched_successfully = False
     last_error_message = "Unknown error during MAL fetch."
     response = None
@@ -164,7 +125,7 @@ async def get_wallpapers(username: str, search: str = None, max_per_anime: int =
             print(f"  MAL JSON Attempt - Extracted {count} completed titles.")
             if count > 0: mal_data_fetched_successfully = True
         else:
-            last_error_message = f"MAL JSON endpoint did not return JSON. Content-Type: {response.headers.get('Content-Type')}"
+            last_error_message = f"MAL JSON endpoint Non-JSON Response. CT: {response.headers.get('Content-Type')}"
             print(f"  MAL JSON Attempt - {last_error_message}")
     except requests.exceptions.HTTPError as e: last_error_message = f"MAL JSON Attempt - HTTP Error: {e}"; print(f"  {last_error_message}")
     except requests.exceptions.RequestException as e: last_error_message = f"MAL JSON Attempt - Network Error: {e}"; print(f"  {last_error_message}")
@@ -227,15 +188,13 @@ async def get_wallpapers(username: str, search: str = None, max_per_anime: int =
 
     # --- Search Wallhaven with Limited Concurrency (Single Prioritized Search) ---
     processed_titles_count = 0
-    # Use the CONCURRENCY_LIMIT defined at the top (read from Env Var or default)
-    semaphore = asyncio.Semaphore(CONCURRENCY_LIMIT)
+    semaphore = asyncio.Semaphore(CONCURRENCY_LIMIT) # Use limit from top
     print(f"\nStarting Wallhaven search for {len(unique_anime_list)} titles (Concurrency: {CONCURRENCY_LIMIT}, Single Search Strategy)...")
     print("-" * 30)
 
     # This function performs the SINGLE prioritized search logic
     async def fetch_title_wallhaven_prioritized(anime_info):
         original_title = anime_info['title']; english_title = anime_info['title_eng']; final_urls = []
-        # Determine the single best search term (Prioritize English)
         base_title_for_generic = english_title if english_title else original_title
         search_term_simplified = simplify_title(base_title_for_generic)
         print(f"  -> Using search term: '{search_term_simplified}' (Derived from: '{base_title_for_generic}')")
@@ -252,10 +211,8 @@ async def get_wallpapers(username: str, search: str = None, max_per_anime: int =
         nonlocal processed_titles_count
         async with sem:
             print(f"\n({index+1}/{len(unique_anime_list)}) Processing: '{anime_data['title']}' (Sem acquired)")
-            # Call the single-search function
             result_tuple = await fetch_title_wallhaven_prioritized(anime_data)
-            processed_titles_count += 1
-            return result_tuple # Returns (original_title, final_url_list, simplified_term_used)
+            processed_titles_count += 1; return result_tuple
 
     # Create and run tasks concurrently
     tasks = [process_anime_with_semaphore(semaphore, anime_item, i) for i, anime_item in enumerate(unique_anime_list)]
@@ -268,25 +225,16 @@ async def get_wallpapers(username: str, search: str = None, max_per_anime: int =
     # --- Post-Processing Filter for Duplicates ---
     print("Filtering results to remove duplicates from title simplification...")
     final_results = {}; processed_simplified_terms = set(); skipped_count = 0
-    # Need mapping to get english title again for recalculating simplified term
-    title_to_info_map = {item['title']: item for item in unique_anime_list}
-
     for original_title, urls, simplified_term_used in search_results_list:
-        if not urls: continue # Skip titles where no wallpapers were found
-
-        # Check if we've already added results for this simplified term
+        if not urls: continue
         if simplified_term_used not in processed_simplified_terms:
-            final_results[original_title] = urls
-            processed_simplified_terms.add(simplified_term_used)
-        else:
-            # Skip adding this entry to prevent visual duplication
-            print(f"  Skipping results for '{original_title}' as simplified term '{simplified_term_used}' already processed.")
-            skipped_count += 1
+            final_results[original_title] = urls; processed_simplified_terms.add(simplified_term_used)
+        else: print(f"  Skipping results for '{original_title}' (term '{simplified_term_used}' already processed)."); skipped_count += 1
     print(f"Finished filtering. Kept {len(final_results)} entries, skipped {skipped_count} due to simplification collision.")
 
     # --- Return Final Results ---
     total_time = time.time() - start_time
-    print(f"\nFinished all processing. Found wallpapers for {len(final_results)} titles.")
+    print(f"\nFinished all processing. Found wallpapers for {len(results)} titles.") # Corrected variable name here
     print(f"Total request time: {total_time:.2f}s")
     return {"wallpapers": final_results}
 
