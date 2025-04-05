@@ -1,3 +1,21 @@
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+import requests
+import xml.etree.ElementTree as ET
+from bs4 import BeautifulSoup
+
+# Create FastAPI app instance
+app = FastAPI()
+
+# Add CORS middleware to allow cross-origin requests
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 @app.get("/wallpapers")
 def get_wallpapers(username: str, search: str = None, max_per_anime: int = 3):
     headers = {
@@ -10,9 +28,6 @@ def get_wallpapers(username: str, search: str = None, max_per_anime: int = 3):
 
     mal_url = f"https://myanimelist.net/animelist/{username}?status=1"
     response = requests.get(mal_url, headers=headers)
-
-    # Log the response status
-    print(f"Fetched MAL data for {username}, status code: {response.status_code}")
 
     if response.status_code != 200:
         return {"error": "Could not fetch MAL data"}
@@ -27,12 +42,6 @@ def get_wallpapers(username: str, search: str = None, max_per_anime: int = 3):
             if not search or search.lower() in title.lower():
                 anime_titles.append(title)
 
-    # Log parsed titles
-    print(f"Parsed anime titles: {anime_titles}")
-
-    if not anime_titles:
-        return {"error": "No completed anime found for this user."}
-
     results = {}
 
     for title in anime_titles:
@@ -46,9 +55,7 @@ def get_wallpapers(username: str, search: str = None, max_per_anime: int = 3):
             html = requests.get(wallhaven_url, headers=headers, timeout=10).text
             soup = BeautifulSoup(html, "html.parser")
             thumbs = soup.select("figure > a.preview")
-            print(f"Found {len(thumbs)} wallpapers for {title}")
-        except Exception as e:
-            print(f"Error fetching wallpapers for {title}: {e}")
+        except:
             continue
 
         images = []
@@ -66,13 +73,10 @@ def get_wallpapers(username: str, search: str = None, max_per_anime: int = 3):
                         images.append(full_img_url)
                 if len(images) >= max_per_anime:
                     break
-            except Exception as e:
-                print(f"Error parsing image for {title}: {e}")
+            except:
                 continue
 
         if images:
             results[title] = images
 
-    # Log the results being returned
-    print(f"Returning results: {results}")
     return results
